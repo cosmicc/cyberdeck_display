@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 
 import board
+import subprocess
 from gpiozero import CPUTemperature
-import RPi.GPIO as GPIO
+from datetime import datetime
+from pi1wire import Pi1Wire, Resolution
 from ina260.controller import Controller
 import adafruit_shtc3
 from luma.core.interface.serial import spi
 from luma.core.render import canvas
 from luma.oled.device import ssd1351
 from time import sleep
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageColor
 import psutil
 
-REGFONT = "fonts/sf-pro-display/SFPRODISPLAYREGULAR.OTF"
-MEDFONT = "fonts/sf-pro-display/SFPRODISPLAYMEDIUM.OTF"
-BLDFONT = "fonts/sf-pro-display/SFPRODISPLAYBOLD.OTF"
+INSTALL_DIR = "/home/ip/cyberdeck_display"
+
+REGFONT = f"{INSTALL_DIR}/fonts/sf-pro-display/SFPRODISPLAYREGULAR.OTF"
+MEDFONT = f"{INSTALL_DIR}/fonts/sf-pro-display/SFPRODISPLAYMEDIUM.OTF"
+BLDFONT = f"{INSTALL_DIR}/fonts/sf-pro-display/SFPRODISPLAYBOLD.OTF"
 
 regfont_large = ImageFont.truetype(REGFONT, 22)
 regfont_medium = ImageFont.truetype(REGFONT, 18)
@@ -23,8 +27,13 @@ medfont_large = ImageFont.truetype(MEDFONT, 22)
 medfont_medium = ImageFont.truetype(MEDFONT, 18)
 bldfont_large = ImageFont.truetype(BLDFONT, 22)
 
-batt_img = Image.open("images/batt.png")
-chg_img = Image.open("images/charging.png")
+batt_img = Image.open(f"{INSTALL_DIR}/images/batt.png")
+chg_img = Image.open(f"{INSTALL_DIR}/images/charging.png").convert("RGBA")
+fanon_img = Image.open(f"{INSTALL_DIR}/images/fan_on.png").convert("RGBA")
+fanon_img = fanon_img.resize((20,20))
+fanoff_img = Image.open(f"{INSTALL_DIR}/images/fan_on.png").convert("RGBA")
+fanoff_img = fanoff_img.resize((20,20))
+
 
 BATT_AGM = [10.50, 11.51, 11.66, 11.81, 11.95, 12.05, 12.15, 12.30, 12.50, 12.75, 13.00, 14.00, "SLA/AGM"]
 BATT_WET = [10.50, 11.31, 11.58, 11.75, 11.90, 12.06, 12.20, 12.32, 12.42, 12.50, 12.60, 14.00, "WET"]
@@ -33,43 +42,26 @@ BATT_LIFEPO4 = [10.00, 12.00, 12.50, 12.80, 12.90, 13.00, 13.10, 13.20, 13.30, 1
 GREEN = "Lime"
 YELLOW = "Yellow"
 RED = "Crimson"
-BLUE = "DodgerBlue"
+BLUE = "Blue"
+AMP_COLOR = "Cyan"
+WATT_COLOR = "Cyan"
 
 CPUFAN_PIN = 23
 EXTRFAN_PIN = 22
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(CPUFAN_PIN, GPIO.OUT)
-GPIO.setup(EXTRFAN_PIN, GPIO.OUT)
+HISTOGRAM_RESOLUTION = 125
 
 BATT_TYPE = BATT_AGM
-
-serial = spi(device=0, port=0, gpio_DC=20, gpio_RST=21)
-oled = ssd1351(serial, width=128, height=128, bgr=True)
-
-try:
-    i2c = board.I2C()
-    sht = adafruit_shtc3.SHTC3(i2c)
-except:
-    print("Temerature Sensor Failure")
-    class SHT:
-        def __init__(self):
-            self.temperature = 0.0
-            self.relative_humidity = 0.0
-    sht = SHT()
-
-battina = Controller(address=0x40)
-loadina = Controller(address=0x44)
-extrina = Controller(address=0x46)
 
 class Stats:
     def __init__(self):
         self.extr_temp = 0.0
         self.extr_humidity = 0.0
-        self.cpu_load = 0.0
+        self.cpu_load = 0
         self.cpu_temp = 0.0
         self.batt_volts = 0.0
         self.batt_amps = 0.0
         self.batt_watts = 0.0
+        self.batt_temp = 0.0
         self.load_volts = 0.0
         self.load_amps = 0.0
         self.load_watts = 0.0
@@ -77,20 +69,48 @@ class Stats:
         self.extr_amps = 0.0
         self.extr_watts = 0.0
         self.extr_fan = 0
-        self.cpu_fan = 0
+        self.cpu_fan = 1
+        self.batt_histogram_data = []
+        self.load_histogram_data = []
+        self.extr_histogram_data = []
+        for x in range(0, HISTOGRAM_RESOLUTION):
+            self.batt_histogram_data.append(0)
+            self.load_histogram_data.append(0)
+            self.extr_histogram_data.append(0)
     def update(self):
+        self.uptime = datetime.now() - datetime.fromtimestamp(psutil.boot_time())
         self.batt_volts = battina.voltage()
         self.batt_amps = battina.current()
         self.batt_watts = self.batt_amps * self.batt_volts
+        self.batt_temp = 30.1
         self.cpu_temp = CPUTemperature().temperature
-        self.cpu_load = float(psutil.cpu_percent())
-        self.extr_temp = sht.temperature
-        self.extr_humdity = sht.relative_humidity
-        self.cpu_fan = GPIO.input(CPUFAN_PIN)
-        self.extr_fan = GPIO.input(EXTRFAN_PIN)
+        self.cpu_load = int(psutil.cpu_percent())
+        try:
+            self.extr_temp = sht.temperature
+            self.extr_humidity = sht.relative_humidity
+        except:
+            pass
+            #print("Error reading external temperature sensor")
+        self.cpu_fan = gpio_info(CPUFAN_PIN)["level"]
+        self.extr_fan = gpio_info(EXTRFAN_PIN)["level"]
+        self.batt_histogram_data.pop(HISTOGRAM_RESOLUTION-1)
+        self.batt_histogram_data.insert(0, int(self.batt_watts))
+        #print (self.__dict__)
 
 def map_range(x, in_min, in_max, out_min, out_max):
   return (x - in_min) * (out_max - out_min) // (in_max - in_min) + out_min
+
+def gpio_info(pin):
+    p = subprocess.Popen(f"raspi-gpio get {pin}", stdout=subprocess.PIPE, shell=True)
+    (output, err) = p.communicate()
+    p_status = p.wait()
+    gdata = output.decode().strip()
+    gdata_split = gdata.split(" ")
+    level = gdata_split[2].split("=")[1]
+    fsel = gdata_split[3].split("=")[1]
+    func = gdata_split[4].split("=")[1]
+    pull = gdata_split[5].split("=")[1]
+    return {"level": level, "fsel": fsel, "func": func, "pull": pull}
 
 def calc_vinfo(voltage):
     vrange = BATT_TYPE
@@ -119,65 +139,187 @@ def calc_vinfo(voltage):
     elif voltage >= vrange[0]:
         return (map_range(voltage, vrange[0], vrange[1], 0, 10), "Shut Down", RED)
 
+def draw_value(position, text, color, draw):
+    if position == 5:
+        fontwidth = regfont_medium.getlength(text)
+    else:
+        fontwidth = medfont_large.getlength(text)
+    if position == 1:
+        draw.text((((oled.width / 2) / 2) - (fontwidth / 2) - 3, 1), text, font=medfont_large, fill=color)
+    elif position == 2:
+        draw.text((oled.width - ((oled.width / 2) / 2) - (fontwidth / 2) + 3, 1), text, font=medfont_large, fill=color)
+    elif position == 3:
+        draw.text((((oled.width / 2) / 2) - (fontwidth / 2) - 3, 25), text, font=medfont_large, fill=color)
+    elif position == 4:
+        draw.text((oled.width - ((oled.width / 2) / 2) - (fontwidth / 2) + 3, 25), text, font=medfont_large, fill=color)
+    elif position == 5:
+        draw.text((((oled.width / 2) / 2) - (fontwidth / 2), 105), text, font=regfont_medium, fill=color)
+
+def draw_histogram(data, draw):
+    lpos = 2
+    for dt in data:
+        draw.line([(lpos, 101-dt), (lpos, 101)], fill=BLUE)
+        lpos += 1
+    shape = [(1,53), (oled.width-1, 101)]
+    draw.rectangle(shape, outline = "white")
+
 def display_batt_screen():
     with canvas(oled) as draw:
         stats.update()
-        v_disp = f"{stats.batt_volts:.1f}v"
-        draw.text((1,1), v_disp, font=medfont_large, fill="white")
-        vinfo = calc_vinfo(stats.batt_volts)
-        p_disp = f"{vinfo[0]:.0f}%"
-        fontwidth = medfont_large.getlength(p_disp)
-        nfill = vinfo[2]
-        draw.text((oled.width - fontwidth, 1), p_disp, font=medfont_large, fill=nfill)
-        m_disp = f"{stats.batt_amps:.2f}a"
-        draw.text((1, 28), m_disp, font=medfont_large, fill="white")
-        w_disp = f"{stats.batt_watts:.1f}w"
-        fontwidth = medfont_large.getlength(w_disp)
-        draw.text((oled.width - fontwidth, 28), w_disp, font=medfont_large, fill="white")
-        shape = [(31, 64), (map_range(vinfo[0], 0, 100, 31, 92), 91)]
-        draw.rectangle(shape, fill = vinfo[2])
-        draw.bitmap((oled.width / 2 - 35, 62), batt_img)
-#        if vinfo[1] != "Charging":
-#           draw.bitmap((oled.width / 2 - 15, 80), chg_img)
-        #fontwidth = regfont_small.getlength(BATT_TYPE[12])
-        #draw.text((oled.width / 2 - fontwidth / 2, 75), BATT_TYPE[12], font=regfont_small, fill="red")
 
+        vinfo = calc_vinfo(stats.batt_volts)
+        text = f"{vinfo[0]:.0f}%"
+        color = vinfo[2]
+        draw_value(1, text, color, draw)
+
+        text = f"{stats.batt_watts:.1f}w"
+        color = WATT_COLOR
+        draw_value(2, text, color, draw)
+
+        text = f"{stats.batt_temp:.1f}°"
+        if stats.batt_temp < 0:
+            color = RED
+        elif stats.batt_temp <= 5 or stats.batt_temp >= 40:
+            color = YELLOW
+        elif stats.batt_temp > 45:
+            color = RED
+        else:
+            color = GREEN
+        draw_value(3, text, color, draw)
+
+        text = f"{stats.batt_amps:.2f}a"
+        color = AMP_COLOR
+        draw_value(5, text, color, draw)
+
+        text = f"{stats.batt_volts:.1f}v"
+        color = vinfo[2]
+        draw_value(4, text, color, draw)
+
+        draw_histogram(stats.batt_histogram_data, draw)
+
+        #shape = [(31, 64), (map_range(vinfo[0], 0, 100, 31, 92), 91)]
+        #draw.rectangle(shape, fill = vinfo[2])
+        #draw.bitmap((oled.width / 2 - 35, 62), batt_img)
+
+#        v_disp = f"{stats.batt_volts:.1f}v"
+#        fontwidth = medfont_large.getlength(v_disp)
+#        draw.text((((oled.width / 2) / 2) - (fontwidth / 2) - 3,1), v_disp, font=medfont_large, fill="white")
+        #if vinfo[1] != "Charging":
+        #   draw.bitmap((oled.width / 2 - 15, 80), chg_img)
 
 def display_load_screen():
     with canvas(oled) as draw:
         stats.update()
-        l_disp = str(stats.cpu_load) + '%'
-        draw.text((1, 1), l_disp, font=medfont_large, fill="white")
-        m_disp = f"{stats.batt_amps:.2f}a"
-        draw.text((1, 28), m_disp, font=medfont_large, fill="white")
-        w_disp = f"{stats.batt_watts:.1f}w"
-        fontwidth = medfont_large.getlength(w_disp)
-        draw.text((oled.width - fontwidth, 28), w_disp, font=medfont_large, fill="white")
-        c_disp = f"{stats.cpu_temp:.1f}°"
-        fontwidth = medfont_large.getlength(c_disp)
-        draw.text((oled.width - fontwidth, 1), c_disp, font=medfont_large, fill="white")
-        if stats.cpu_fan == 1:
-            f_disp = "CPU FAN ON"
+
+        text = str(stats.cpu_load) + '%'
+        if stats.cpu_load > 90:
+            color = RED
+        elif stats.cpu_load > 65:
+            color = YELLOW
         else:
-            f_disp = "CPU FAN OFF"
-        fontwidth = medfont_medium.getlength(f_disp)
-        draw.text((oled.width / 2 - fontwidth / 2, 100), f_disp, font=medfont_medium, fill="yellow")
+            color = GREEN
+        draw_value(1, text, color, draw)
 
+        text = f"{stats.batt_amps:.2f}a"
+        color = AMP_COLOR
+        draw_value(5, text, color, draw)
 
-def display_extpower_screen():
+        text = f"{stats.batt_watts:.1f}w"
+        color = WATT_COLOR
+        draw_value(2, text, color, draw)
+
+        text = f"{stats.cpu_temp:.1f}°"
+        if stats.cpu_temp > 65:
+            color = YELLOW
+        elif stats.cpu_temp > 80:
+            color = RED
+        else:
+            color = GREEN
+        draw_value(3, text, color, draw)
+
+        text = f"{stats.load_volts:.1f}v"
+        if stats.load_volts > 14 or stats.load_volts < 11.0:
+            color = RED
+        elif stats.load_volts > 13 or stats.load_volta < 11.5:
+            color = YELLOW
+        else:
+            color = GREEN
+        draw_value(4, text, color, draw)
+
+        img = Image.new('RGBA', (20, 20), 0xFF)
+        if stats.cpu_fan == 1:
+            img.paste(fanon_img)
+        else:
+            img.paste(fanoff_img)
+        draw.bitmap((oled.width / 2, 105), img)
+
+        draw_histogram(stats.load_histogram_data, draw)
+
+def display_extr_screen():
     with canvas(oled) as draw:
         stats.update()
-        draw.text((1, 1), "CPU:", font=regfont_large, fill="white")
-        c_disp = f"{stats.cpu_temp:.1f}°"
-        fontwidth = regfont_large.getlength(c_disp)
-        draw.text((oled.width - fontwidth, 1), c_disp, font=regfont_large, fill="white")
-        f_disp = "FAN OFF"
-        fontwidth = regfont_large.getlength(f_disp)
-        draw.text((oled.width / 2 - fontwidth / 2, 32), f_disp, font=regfont_large, fill="yellow")
-        draw.text((1, 64), f"{stats.extr_temp:.1f}° {stats.extr_humidity:.0f}%", font=regfont_large, fill="white")
+
+        text = f"{stats.extr_temp:.1f}°"
+        if stats.extr_temp > 60:
+            color = RED
+        elif stats.extr_temp > 45:
+            color = YELLOW
+        else:
+            color = GREEN
+        draw_value(1, text, color, draw)
+
+        text = f"{stats.batt_amps:.2f}a"
+        color = AMP_COLOR
+        draw_value(5, text, color, draw)
+
+        text = f"{stats.batt_watts:.1f}w"
+        color = WATT_COLOR
+        draw_value(2, text, color, draw)
+
+        text = f"{stats.extr_volts:.1f}v"
+        if stats.extr_volts > 40 or stats.extr_volts < 12.0:
+            color = RED
+        elif stats.extr_volts > 30 or stats.extr_volts < 13:
+            color = YELLOW
+        else:
+            color = GREEN
+        draw_value(4, text, color, draw)
+
+        c_disp = f"{stats.extr_humidity:.0f}%"
+        if stats.extr_humidity > 50:
+            color = YELLOW
+        elif stats.extr_humidity > 65:
+            color = RED
+        else:
+            color = GREEN
+        draw_value(3, text, color, draw)
+
+        if stats.extr_fan == 1:
+            f_disp = "EXT FAN ON"
+            fcolor = YELLOW
+        else:
+            f_disp = "EXT FAN OFF"
+            fcolor = GREEN
+        fontwidth = medfont_medium.getlength(f_disp)
+        draw.text((oled.width / 2 - fontwidth / 2, 105), f_disp, font=medfont_medium, fill=fcolor)
+
+        draw_histogram(stats.extr_histogram_data, draw)
 
 
 if __name__ == "__main__":
+    serial = spi(device=0, port=0, gpio_DC=20, gpio_RST=21)
+    oled = ssd1351(serial, width=128, height=128, bgr=True)
+
+    try:
+        i2c = board.I2C()
+        sht = adafruit_shtc3.SHTC3(i2c)
+    except:
+        print("Temerature Sensor Failure")
+
+    battina = Controller(address=0x40)
+    loadina = Controller(address=0x44)
+    extrina = Controller(address=0x46)
+
     stats = Stats()
     while(True):
         for x in range(3):
@@ -185,4 +327,7 @@ if __name__ == "__main__":
             sleep(3)
         for x in range(3):
             display_load_screen()
+            sleep(3)
+        for x in range(3):
+            display_extr_screen()
             sleep(3)

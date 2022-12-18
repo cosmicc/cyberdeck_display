@@ -1,0 +1,17 @@
+-i https://pypi.org/simple
+cbor2==5.4.6 ; python_version >= '3.7'
+colorzero==2.0
+gpiozero==1.6.2
+loguru==0.6.0
+luma.core==2.4.0
+luma.oled==3.9.0
+pi1wire==0.3.0
+pillow==9.3.0 ; python_version >= '3.7'
+psutil==5.9.4
+pyftdi==0.54.0 ; python_version >= '3.7'
+pyserial==3.5
+pyusb==1.2.1 ; python_full_version >= '3.6.0'
+rpi.gpio==0.7.1 ; platform_system == 'Linux'
+setuptools==65.6.3 ; python_version >= '3.7'
+smbus2==0.4.2
+spidev==3.6 ; platform_system == 'Linux'

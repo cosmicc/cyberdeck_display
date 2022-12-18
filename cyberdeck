@@ -1,29 +1,37 @@
 #!/usr/bin/env python3
 
-from loguru import logger as log
+# TODO:
+# Add 1wire temp for battery temperature
+# Add calculations for time remaining from rolling average
+#
+
+import pickle
+import signal
 import subprocess
 import sys
 from datetime import datetime
-from time import sleep
+from os import nice
+from time import sleep, time
 
 import adafruit_shtc3
 import board
 import psutil
 from gpiozero import CPUTemperature
 from ina260.controller import Controller
+from loguru import logger as log
 from luma.core.interface.serial import spi
 from luma.core.render import canvas
 from luma.oled.device import ssd1351
 from pi1wire import Pi1Wire, Resolution
 from PIL import Image, ImageFont
-import pickle
+from processlock import PLock
 
-loglevel = 'DEBUG'
+loglevel = 'INFO'
 
 INSTALL_DIR = "/home/ip/cyberdeck_display"
 DATA_FILE= "/home/ip/display_data.db"
 
-BATT_AGM = [10.50, 11.51, 11.66, 11.81, 11.95, 12.05, 12.15, 12.30, 12.50, 12.75, 13.00, 14.00, "SLA/AGM"]
+BATT_AGMSLA = [10.50, 11.51, 11.66, 11.81, 11.95, 12.05, 12.15, 12.30, 12.50, 12.75, 13.00, 14.00, "SLA/AGM"]
 BATT_WET = [10.50, 11.31, 11.58, 11.75, 11.90, 12.06, 12.20, 12.32, 12.42, 12.50, 12.60, 14.00, "WET"]
 BATT_LIFEPO4 = [10.00, 12.00, 12.50, 12.80, 12.90, 13.00, 13.10, 13.20, 13.30, 13.40, 13.60, 14.00, "LIFEPO4"]
 
@@ -38,8 +46,10 @@ CPUFAN_PIN = 23
 EXTRFAN_PIN = 22
 HISTOGRAM_RESOLUTION = 125
 SENSOR_RESOLUTION = 10
+SCREEN_SECONDS = 10
+UPDATE_SECONDS = 1
 BATT_AH_SIZE = 10
-BATT_TYPE = BATT_AGM
+BATT_TYPE = BATT_AGMSLA
 
 class Stats:
     extr_temp = 0.0
@@ -66,6 +76,7 @@ class Stats:
     extr_histogram_data = []
     batt_charge_start_time = 0
     batt_start_time = datetime.now()
+    current_screen = 1
     log.debug('Loading saved pickle data...')
     try:
         dbfile = open(DATA_FILE, 'rb')
@@ -93,16 +104,17 @@ class Stats:
             self.load_histogram_data.append(0)
             self.extr_histogram_data.append(0)
 
-    def save_data(self):
+    def save(self):
         try:
-            dbfile = open(DATA_FILE, 'ab')
+            dbfile = open(DATA_FILE, 'wb')
             db = {}
             db['timestamp'] = datetime.now()
-            db['running_avg'] = self.batt_rolling_avg
-            db['avg_count'] = self.batt_avg_count
+            db['running_avg'] = self.batt_running_avg
+            db['avg_count'] = self.batt_running_avg_count
             db['last_full'] = self.batt_last_full_time
             pickle.dump(db, dbfile)
             dbfile.close()
+            log.info(f'Saved pickle data to disk {DATA_FILE}')
         except:
             log.critical('Error saving pickle data')
             exit(1)
@@ -127,15 +139,15 @@ class Stats:
                  avolts.insert(0, round(battina.voltage(), 2))
                  aamps.insert(0, round(battina.current(), 2))
                  self.batt_watts = round(self.batt_amps * self.batt_volts, 1)
-            log.info(f'Battery volt data: {avolts}')
-            log.info(f'Battery amp data: {aamps}')
+            log.debug(f'Battery volt data: {avolts}')
+            log.debug(f'Battery amp data: {aamps}')
             self.batt_volts = round(sum(avolts) / len(avolts), 2)
             self.batt_amps = round(sum(aamps) / len(avolts), 2)
             self.batt_watts = round(self.batt_volts * self.batt_amps, 1)
             log.info(f'Battery power data: [{self.batt_volts}v], [{self.batt_amps}a], [{self.batt_watts}w]')
             self.batt_running_avg_count += 1
-            self.batt_running_avg = (self.batt_running_avg * (self.batt_running_avg_count-1) + self.batt_amps) / self.batt_running_avg_count
-            log.info(f'New battery running average: [{self.batt_running_avg:.3f}a], [{self.batt_running_avg_count}]')
+            self.batt_running_avg = round(((self.batt_running_avg * (self.batt_running_avg_count-1) + self.batt_amps) / self.batt_running_avg_count), 2)
+            log.info(f'New battery running average: [{self.batt_running_avg:.2f}a], [{self.batt_running_avg_count}]')
         except:
             log.warning('Batt power sensor error, skipping')
         try:
@@ -172,7 +184,9 @@ class Stats:
         self.load_histogram_data.pop(HISTOGRAM_RESOLUTION-1)
         self.load_histogram_data.insert(0, int(self.load_watts))
         log.debug('Histogram update complete')
-        log.debug('Stats update complete')
+        data_ready = True
+        log.debug('Stats update complete, updating screen')
+        update_screen()
         #print (self.__dict__)
 
     def batt_info(self, voltage):
@@ -292,10 +306,18 @@ def display_watts(stat, err, wrn, draw):
         color = DEFAULT
     draw_value(2, text, color, draw)
 
+def update_screen():
+    if stats.current_screen == 1:
+        batt_screen()
+    elif stats.current_screen == 2:
+        cpu_screen()
+    elif stats.current_screen == 3:
+        batt_detail_screen()
+    elif stats.current_screen == 4:
+        extr_screen()
+
 def batt_detail_screen():
     with canvas(oled) as draw:
-        stats.update()
-
         display_watts(stats.batt_watts, 113, 71, draw)
 
         text = f"{stats.batt_percent:.0f}%"
@@ -324,16 +346,10 @@ def batt_detail_screen():
         draw_value(6, text, color, draw)
 
         draw_histogram(stats.batt_histogram_data, draw)
-
-       #        v_disp = f"{stats.batt_volts:.1f}v"
-#        fontwidth = medfont_large.getlength(v_disp)
-#        draw.text((((oled.width / 2) / 2) - (fontwidth / 2) - 3,1), v_disp, font=medfont_large, fill="white")
-        #if vinfo[1] != "Charging":
-        #   draw.bitmap((oled.width / 2 - 15, 80), chg_img)
+        data_ready = False
 
 def cpu_screen():
     with canvas(oled) as draw:
-        stats.update()
 
         text = str(stats.cpu_load) + '%'
         if stats.cpu_load > 90:
@@ -378,8 +394,6 @@ def cpu_screen():
 
 def extr_screen():
     with canvas(oled) as draw:
-        stats.update()
-
         text = f"{stats.extr_temp:.1f}°"
         if stats.extr_temp >= 60 or stats.extr_temp <= 0:
             color = RED
@@ -423,7 +437,6 @@ def extr_screen():
 
 def batt_screen():
     with canvas(oled) as draw:
-        stats.update()
         text = f'{stats.batt_percent:.0f}%'
         fontwidth = bldfont_large.getlength(text)
         draw.text(((oled.width / 2) - (fontwidth / 2), 3), text, font=bldfont_large, fill=GREEN)
@@ -436,11 +449,12 @@ def batt_screen():
         if stats.batt_state == "Charging":
             draw.bitmap((oled.width / 2 - 25, 65), chg_img)
 
-
 if __name__ == "__main__":
     consoleformat = "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green>| <level>{level: <8}</level> | <level>{message}</level> |<cyan>{function}</cyan>:<cyan>{line}</cyan>"
     log.remove()
     log.add(sink=sys.stdout, level=loglevel, format=consoleformat, colorize=True)
+
+    log.info('Starting initialzation...')
 
     REGFONT = f"{INSTALL_DIR}/fonts/sf-pro-display/SFPRODISPLAYREGULAR.OTF"
     MEDFONT = f"{INSTALL_DIR}/fonts/sf-pro-display/SFPRODISPLAYMEDIUM.OTF"
@@ -462,51 +476,71 @@ if __name__ == "__main__":
     fanoff_img = Image.open(f"{INSTALL_DIR}/images/fan_on.png").convert("RGBA")
     fanoff_img = fanoff_img.resize((20,20))
 
+    def signal_handler(signal, frame):
+        log.error(f'Termination signal [{signals[signal]}] recieved. Shutting down...')
+        stats.save()
+        processlock.unlock()
+        exit(2)
+
+    signal.signal(signal.SIGTERM, signal_handler)  # Graceful Shutdown
+    signal.signal(signal.SIGHUP, signal_handler)  # Reload/Restart
+    signal.signal(signal.SIGINT, signal_handler)  # Hard Exit
+    signal.signal(signal.SIGQUIT, signal_handler)  # Hard Exit
+
+    processlock = PLock()
+    processlock.lock()
+
+    nice(-20)
+
     log.debug("Initalizing display...")
     serial = spi(device=0, port=0, gpio_DC=20, gpio_RST=21)
     oled = ssd1351(serial, width=128, height=128, bgr=True)
-    log.info("Display initialization successful")
+    log.debug("Display initialization successful")
     log.debug("Initializing sensors...")
     try:
         i2c = board.I2C()
         sht = adafruit_shtc3.SHTC3(i2c)
-        log.info("External temperature sensor initialized")
+        log.debug("External temperature sensor initialized")
     except:
         log.error("External temperature sensor failure")
     try:
         battina = Controller(address=0x40)
         battina.voltage()
-        log.info("Battery sensor initialized")
+        log.debug("Battery sensor initialized")
     except:
         log.error("Battery power sensor failure")
     try:
         loadina = Controller(address=0x44)
         loadina.voltage()
-        log.info("Load sensor initialized")
+        log.debug("Load sensor initialized")
     except:
         log.error("Load power sensor failure")
     try:
         extrina = Controller(address=0x46)
         extrina.voltage()
-        log.info("External power sensor initialized")
+        log.debug("External power sensor initialized")
     except:
         log.error("External power sensor failure")
 
     stats = Stats()
+    stats.update()
+    log.info('Initializations complete!')
+
+    update_start_time = time()
+    screen_start_time = time()
+    save_start_time = time()
+    log.debug('Starting main loop...')
     while(True):
-        for x in range(3):
-            log.debug("Executing battery screen routine...")
-            batt_screen()
-            sleep(3)
-        for x in range(3):
-            log.debug("Executing load screen routing...")
-            cpu_screen()
-            sleep(3)
-        for x in range(3):
-            log.debug("Executing battery detail screen...")
-            batt_detail_screen()
-            sleep(3)
-        for x in range(3):
-            log.debug("Executing external detail screen...")
-            extr_screen()
-            sleep(3)
+        if time() - update_start_time > UPDATE_SECONDS:
+            stats.update()
+            update_start_time = time()
+        elif time() - screen_start_time > SCREEN_SECONDS:
+            stats.current_screen += 1
+            if stats.current_screen == 5:
+                stats.current_screen = 0
+            screen_start_time = time()
+        if time() - save_start_time > 60:
+            stats.save()
+            save_start_time = time()
+        sleep(2)
+

@@ -26,7 +26,7 @@ from pi1wire import Pi1Wire, Resolution
 from PIL import Image, ImageFont
 from processlock import PLock
 
-loglevel = 'INFO'
+loglevel = 'DEBUG'
 
 INSTALL_DIR = "/home/ip/cyberdeck_display"
 DATA_FILE= "/home/ip/display_data.db"
@@ -34,6 +34,8 @@ DATA_FILE= "/home/ip/display_data.db"
 BATT_AGMSLA = [10.50, 11.51, 11.66, 11.81, 11.95, 12.05, 12.15, 12.30, 12.50, 12.75, 13.00, 14.00, "SLA/AGM"]
 BATT_WET = [10.50, 11.31, 11.58, 11.75, 11.90, 12.06, 12.20, 12.32, 12.42, 12.50, 12.60, 14.00, "WET"]
 BATT_LIFEPO4 = [10.00, 12.00, 12.50, 12.80, 12.90, 13.00, 13.10, 13.20, 13.30, 13.40, 13.60, 14.00, "LIFEPO4"]
+
+signals = (0, 'SIGHUP', 'SIGINT', 'SIGQUIT', 4, 5, 6, 7, 8, 'SIGKILL', 10, 11, 12, 13, 14, 'SIGTERM')
 
 GREEN = "Lime"
 YELLOW = "Yellow"
@@ -456,6 +458,8 @@ if __name__ == "__main__":
 
     log.info('Starting initialzation...')
 
+    PID = 0
+
     REGFONT = f"{INSTALL_DIR}/fonts/sf-pro-display/SFPRODISPLAYREGULAR.OTF"
     MEDFONT = f"{INSTALL_DIR}/fonts/sf-pro-display/SFPRODISPLAYMEDIUM.OTF"
     BLDFONT = f"{INSTALL_DIR}/fonts/sf-pro-display/SFPRODISPLAYBOLD.OTF"
@@ -480,6 +484,7 @@ if __name__ == "__main__":
         log.error(f'Termination signal [{signals[signal]}] recieved. Shutting down...')
         stats.save()
         processlock.unlock()
+        log.info('Exiting with result 2')
         exit(2)
 
     signal.signal(signal.SIGTERM, signal_handler)  # Graceful Shutdown
@@ -488,7 +493,7 @@ if __name__ == "__main__":
     signal.signal(signal.SIGQUIT, signal_handler)  # Hard Exit
 
     processlock = PLock()
-    processlock.lock()
+    PID = processlock.lock()
 
     nice(-20)
 

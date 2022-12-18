@@ -41,7 +41,6 @@ class PLock:
             log.exception(f"General error trying to lock process to file {self.lockfile}. exiting.")
             exit(1)
         else:
-            log.debug(f"Process [{self.pid}] locked to file [{self.lockfile}]")
             return True
 
     def _setpidfile(self):
@@ -50,12 +49,12 @@ class PLock:
         except:
             log.exception(f"Error writing pid file {self.pidfile}")
         else:
-            log.debug(f"Pid file [{self.pidfile}] holding pid [{self.pid}]")
+            log.debug(f"Process [{self.pid}] locked to file [{self.pidfile}]")
 
     def lock(self):
         if self._aquirelock():
             self._setpidfile()
-            return True
+            return self.pid
         else:
             log.error(f"Trying to start, but already running on pid {self.pid}")
             exit(1)

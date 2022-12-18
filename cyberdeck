@@ -16,6 +16,7 @@ from luma.core.render import canvas
 from luma.oled.device import ssd1351
 from pi1wire import Pi1Wire, Resolution
 from PIL import Image, ImageFont
+import pickle
 
 loglevel = 'DEBUG'
 
@@ -35,7 +36,8 @@ AMP_COLOR = "DarkOrange"
 CPUFAN_PIN = 23
 EXTRFAN_PIN = 22
 HISTOGRAM_RESOLUTION = 125
-
+SENSOR_RESOLUTION = 10
+BATT_AH_SIZE = 10
 BATT_TYPE = BATT_AGM
 
 class Stats:
@@ -67,55 +69,72 @@ class Stats:
             self.load_histogram_data.append(0)
             self.extr_histogram_data.append(0)
     def update(self):
-        log.info("Starting stats update...")
+        log.debug("Starting stats update...")
         self.uptime = datetime.now() - datetime.fromtimestamp(psutil.boot_time())
         try:
-            self.load_volts = loadina.voltage()
-            self.load_amps = loadina.current()
-            self.load_watts = self.load_amps * self.load_volts
-            log.debug(f'Load power data: {self.load_volts}v, {self.load_amps}a, {self.load_watts}w')
+            self.load_volts = round(loadina.voltage(), 2)
+            self.load_amps = round(loadina.current(), 2)
+            self.load_watts = round(self.load_amps * self.load_volts, 1)
+            log.info(f'Load power data: [{self.load_volts}v], [{self.load_amps}a], [{self.load_watts}w]')
         except:
+            self.load_volts = self.batt_volts #TEMPORARY
+            self.load_amps = self.batt_amps   #TEMPORARY
+            self.load_watts = self.batt_watts #TEMPORARY
             log.warning('Load power sensor error, skipping')
         try:
-            self.batt_volts = battina.voltage()
-            self.batt_amps = battina.current()
-            self.batt_watts = self.batt_amps * self.batt_volts
-            log.debug(f'Batt power data: {self.batt_volts}v, {self.batt_amps}a, {self.batt_watts}w')
+            avolts = []
+            aamps = []
+            for x in range(SENSOR_RESOLUTION):
+                 avolts.insert(0, round(battina.voltage(), 2))
+                 aamps.insert(0, round(battina.current(), 2))
+                 self.batt_watts = round(self.batt_amps * self.batt_volts, 1)
+            log.info(f'Battery volt data: {avolts}')
+            log.info(f'Battery amp data: {aamps}')
+            self.batt_volts = round(sum(avolts) / len(avolts), 2)
+            self.batt_amps = round(sum(aamps) / len(avolts), 2)
+            self.batt_watts = round(self.batt_volts * self.batt_amps, 1)
+            log.info(f'Battery power data: [{self.batt_volts}v], [{self.batt_amps}a], [{self.batt_watts}w]')
         except:
             log.warning('Batt power sensor error, skipping')
         try:
-            self.extr_volts = extrina.voltage()
-            self.extr_amps = extrina.current()
-            self.extr_watts = self.extr_amps * self.extr_volts
-            log.debug(f'External power data: {self.extr_volts}v, {self.extr_amps}a, {self.extr_watts}w')
+            self.extr_volts = round(extrina.voltage(), 2)
+            self.extr_amps = round(extrina.current(), 2)
+            self.extr_watts = round(self.extr_amps * self.extr_volts, 1)
+            for x in range(SENSOR_RESOLUTION):
+                log.info(f'External volt data: {avolts}')
+                log.info(f'External amp data: {aamps}')
+                self.extr_volts = round(sum(avolts) / len(avolts), 2)
+                self.extr_amps = round(sum(aamps) / len(avolts), 2)
+                self.extr_watts = round(self.extr_volts * self.extr_amps, 1)
+                log.info(f'External power data: [{self.extr_volts}v], [{self.extr_amps}a], [{self.extr_watts}w]')
         except:
             log.warning('External power sensor error, skipping')
 
         self.batt_info(self.batt_volts)
         self.batt_temp = 0.0
         try:
-            self.cpu_temp = CPUTemperature().temperature
+            self.cpu_temp = round(CPUTemperature().temperature, 1)
             self.cpu_load = int(psutil.cpu_percent())
-            log.debug(f'CPU data: {self.cpu_load}%, {self.cpu_temp}°')
+            log.info(f'CPU data: [{self.cpu_load}%], [{self.cpu_temp}°]')
         except:
             log.warning('CPU data error, skipping')
         try:
             self.extr_temp = sht.temperature
             self.extr_humidity = sht.relative_humidity
-            log.debug(f'External temperature data: {self.extr_temp}°, {self.extr_humidity}%')
+            log.info(f'External temperature data: [{self.extr_temp}°], [{self.extr_humidity}%]')
         except:
             log.warning('External temperature error, skipping')
         self.cpu_fan = gpio_info(CPUFAN_PIN)["level"]
         self.extr_fan = gpio_info(EXTRFAN_PIN)["level"]
-        log.info('Starting histogram update...')
+        log.debug('Starting histogram update...')
         self.load_histogram_data.pop(HISTOGRAM_RESOLUTION-1)
         self.load_histogram_data.insert(0, int(self.load_watts))
-        log.info('Histogram update complete')
-        log.info('Stats update complete')
+        log.debug('Histogram update complete')
+        log.debug('Stats update complete')
         #print (self.__dict__)
 
     def batt_info(self, voltage):
-        log.info(f'Battery calculations starting...')
+        log.debug(f'Battery calculations starting...')
         vrange = BATT_TYPE
         if voltage >= vrange[11]:
             self.batt_percent = 100
@@ -165,8 +184,8 @@ class Stats:
             self.batt_percent = map_range(voltage, vrange[0], vrange[1], 0, 10)
             self.batt_state = "Shutdown"
             self.batt_color = RED
-        log.debug(f'Battery info: {BATT_TYPE[12]}, {self.batt_percent}%, {self.batt_state}, {self.batt_color}')
-        log.info('Battery calculations complete.')
+        log.info(f'Battery info: [{BATT_TYPE[12]}], [{self.batt_percent}%], [{self.batt_state}], [{self.batt_color}]')
+        log.debug('Battery calculations complete.')
 
 def map_range(x, in_min, in_max, out_min, out_max):
   return (x - in_min) * (out_max - out_min) // (in_max - in_min) + out_min
@@ -222,10 +241,10 @@ def draw_fan(fan, draw):
         draw.bitmap((oled.width / 2 - 7, 1), img)
 
 def display_watts(stat, err, wrn, draw):
-    text = f"{stats.batt_watts:.1f}w"
-    if stats.batt_watts >= err:
+    text = f"{stat:.1f}w"
+    if stat >= err:
         color = RED
-    elif stats.batt_watts >= wrn:
+    elif stat >= wrn:
         color = YELLOW
     else:
         color = DEFAULT
@@ -365,13 +384,15 @@ def batt_screen():
         stats.update()
         text = f'{stats.batt_percent:.0f}%'
         fontwidth = bldfont_large.getlength(text)
-        draw.text(((oled.width / 2) - (fontwidth / 2), 1), text, font=bldfont_large, fill=GREEN)
-        shape = [(31, 64), (map_range(stats.batt_percent, 0, 100, 31, 92), 91)]
+        draw.text(((oled.width / 2) - (fontwidth / 2), 3), text, font=bldfont_large, fill=GREEN)
+        shape = [(17, 50), (map_range(stats.batt_percent, 0, 100, 17, 102), 95)]
         draw.rectangle(shape, fill = stats.batt_color)
         draw.bitmap((oled.width / 2 - 50, 49), batt_img)
         text = f'{stats.batt_watts:.1f} Watts'
-        color = "Cyan"
+        color = "Orange"
         draw_value(7, text, color, draw)
+        if stats.batt_state == "Charging":
+            draw.bitmap((oled.width / 2 - 25, 65), chg_img)
 
 
 if __name__ == "__main__":
@@ -393,6 +414,7 @@ if __name__ == "__main__":
     batt_img = Image.open(f"{INSTALL_DIR}/images/batt.png")
     batt_img = batt_img.resize((100,50))
     chg_img = Image.open(f"{INSTALL_DIR}/images/charging.png").convert("RGBA")
+    chg_img = chg_img.resize((40,20))
     fanon_img = Image.open(f"{INSTALL_DIR}/images/fan_on.png").convert("RGBA")
     fanon_img = fanon_img.resize((20,20))
     fanoff_img = Image.open(f"{INSTALL_DIR}/images/fan_on.png").convert("RGBA")
@@ -434,15 +456,15 @@ if __name__ == "__main__":
             log.debug("Executing battery screen routine...")
             batt_screen()
             sleep(3)
-        for x in range(3):
-            log.debug("Executing load screen routing...")
-            cpu_screen()
-            sleep(3)
-        for x in range(3):
-            log.debug("Executing battery detail screen...")
-            batt_detail_screen()
-            sleep(3)
-        for x in range(3):
-            log.debug("Executing external detail screen...")
-            extr_screen()
-            sleep(3)
+        #for x in range(3):
+        #    log.debug("Executing load screen routing...")
+        #    cpu_screen()
+        #    sleep(3)
+        #for x in range(3):
+        #    log.debug("Executing battery detail screen...")
+        #    batt_detail_screen()
+        #    sleep(3)
+        #for x in range(3):
+        #    log.debug("Executing external detail screen...")
+        #    extr_screen()
+        #    sleep(3)

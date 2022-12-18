@@ -21,6 +21,7 @@ import pickle
 loglevel = 'DEBUG'
 
 INSTALL_DIR = "/home/ip/cyberdeck_display"
+DATA_FILE= "/home/ip/display_data.db"
 
 BATT_AGM = [10.50, 11.51, 11.66, 11.81, 11.95, 12.05, 12.15, 12.30, 12.50, 12.75, 13.00, 14.00, "SLA/AGM"]
 BATT_WET = [10.50, 11.31, 11.58, 11.75, 11.90, 12.06, 12.20, 12.32, 12.42, 12.50, 12.60, 14.00, "WET"]
@@ -41,33 +42,71 @@ BATT_AH_SIZE = 10
 BATT_TYPE = BATT_AGM
 
 class Stats:
+    extr_temp = 0.0
+    extr_humidity = 0.0
+    cpu_load = 0
+    cpu_temp = 0.0
+    batt_volts = 0.0
+    batt_amps = 0.0
+    batt_watts = 0.0
+    batt_temp = 0.0
+    batt_percent = 0
+    batt_state = ""
+    batt_color = DEFAULT
+    load_volts = 0.0
+    load_amps = 0.0
+    load_watts = 0.0
+    extr_volts = 0.0
+    extr_amps = 0.0
+    extr_watts = 0.0
+    extr_fan = 0
+    cpu_fan = 1
+    batt_histogram_data = []
+    load_histogram_data = []
+    extr_histogram_data = []
+    batt_charge_start_time = 0
+    batt_start_time = datetime.now()
+    log.debug('Loading saved pickle data...')
+    try:
+        dbfile = open(DATA_FILE, 'rb')
+        db = pickle.load(dbfile)
+        batt_running_avg = db['running_avg']
+        batt_running_avg_count = db['avg_count']
+        batt_last_full_time = db['last_full']
+        last_boot = db['timestamp']
+        log.info(f'Loaded saved data: {db}')
+    except:
+        dbfile = open(DATA_FILE, 'ab')
+        db = {}
+        db['timestamp'] = datetime.now()
+        db['running_avg'] = 0
+        db['avg_count'] = 0
+        db['last_full'] = datetime.now()
+        pickle.dump(db, dbfile)
+        dbfile.close()
+        log.critical('Error loading saved pickle data')
+        exit(1)
+
     def __init__(self):
-        self.extr_temp = 0.0
-        self.extr_humidity = 0.0
-        self.cpu_load = 0
-        self.cpu_temp = 0.0
-        self.batt_volts = 0.0
-        self.batt_amps = 0.0
-        self.batt_watts = 0.0
-        self.batt_temp = 0.0
-        self.batt_percent = 0
-        self.batt_state = ""
-        self.batt_color = DEFAULT
-        self.load_volts = 0.0
-        self.load_amps = 0.0
-        self.load_watts = 0.0
-        self.extr_volts = 0.0
-        self.extr_amps = 0.0
-        self.extr_watts = 0.0
-        self.extr_fan = 0
-        self.cpu_fan = 1
-        self.batt_histogram_data = []
-        self.load_histogram_data = []
-        self.extr_histogram_data = []
         for x_x in range(0, HISTOGRAM_RESOLUTION):
             self.batt_histogram_data.append(0)
             self.load_histogram_data.append(0)
             self.extr_histogram_data.append(0)
+
+    def save_data(self):
+        try:
+            dbfile = open(DATA_FILE, 'ab')
+            db = {}
+            db['timestamp'] = datetime.now()
+            db['running_avg'] = self.batt_rolling_avg
+            db['avg_count'] = self.batt_avg_count
+            db['last_full'] = self.batt_last_full_time
+            pickle.dump(db, dbfile)
+            dbfile.close()
+        except:
+            log.critical('Error saving pickle data')
+            exit(1)
+
     def update(self):
         log.debug("Starting stats update...")
         self.uptime = datetime.now() - datetime.fromtimestamp(psutil.boot_time())
@@ -94,6 +133,9 @@ class Stats:
             self.batt_amps = round(sum(aamps) / len(avolts), 2)
             self.batt_watts = round(self.batt_volts * self.batt_amps, 1)
             log.info(f'Battery power data: [{self.batt_volts}v], [{self.batt_amps}a], [{self.batt_watts}w]')
+            self.batt_running_avg_count += 1
+            self.batt_running_avg = (self.batt_running_avg * (self.batt_running_avg_count-1) + self.batt_amps) / self.batt_running_avg_count
+            log.info(f'New battery running average: [{self.batt_running_avg:.3f}a], [{self.batt_running_avg_count}]')
         except:
             log.warning('Batt power sensor error, skipping')
         try:
@@ -456,15 +498,15 @@ if __name__ == "__main__":
             log.debug("Executing battery screen routine...")
             batt_screen()
             sleep(3)
-        #for x in range(3):
-        #    log.debug("Executing load screen routing...")
-        #    cpu_screen()
-        #    sleep(3)
-        #for x in range(3):
-        #    log.debug("Executing battery detail screen...")
-        #    batt_detail_screen()
-        #    sleep(3)
-        #for x in range(3):
-        #    log.debug("Executing external detail screen...")
-        #    extr_screen()
-        #    sleep(3)
+        for x in range(3):
+            log.debug("Executing load screen routing...")
+            cpu_screen()
+            sleep(3)
+        for x in range(3):
+            log.debug("Executing battery detail screen...")
+            batt_detail_screen()
+            sleep(3)
+        for x in range(3):
+            log.debug("Executing external detail screen...")
+            extr_screen()
+            sleep(3)

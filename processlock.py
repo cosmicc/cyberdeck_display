@@ -5,9 +5,8 @@ from pathlib import Path
 
 from loguru import logger as log
 
+lockdir = Path("/run/lock")
 rundir = Path("/run")
-tmpdir = Path("/tmp")
-
 
 def cleanName(filename):
     filename = os.path.basename(filename)
@@ -18,15 +17,18 @@ def cleanName(filename):
 class PLock:
     def __init__(self):
         self.pid = str(os.getpid())
-        if rundir.is_dir() and os.access(str(rundir), os.W_OK):
-            self.lockdir = rundir
-        elif tmpdir.is_dir() and os.access(str(tmpdir), os.W_OK):
-            self.lockdir = tmpdir
+        if lockdir.is_dir() and os.access(str(lockdir), os.W_OK):
+            self.lockdir = lockdir
         else:
             log.critical("Cannot find a valid place to put the lockfile. Exiting")
             exit(1)
+        if rundir.is_dir() and os.access(str(rundir), os.W_OK):
+            self.rundir = rundir
+        else:
+            log.critical("Cannot find a valid place to put the pidfile. Exiting")
+            exit(1)
         self.lockfile = self.lockdir / f"{cleanName(sys.argv[0])}.lock"
-        self.pidfile = self.lockdir / f"{cleanName(sys.argv[0])}.pid"
+        self.pidfile = self.rundir / f"{cleanName(sys.argv[0])}.pid"
 
     def _aquirelock(self):
         if not self.lockfile.is_file():
@@ -41,6 +43,7 @@ class PLock:
             log.exception(f"General error trying to lock process to file {self.lockfile}. exiting.")
             exit(1)
         else:
+            log.debug(f'Lock file [{self.lockfile}] locked to PID [{self.pid}]')
             return True
 
     def _setpidfile(self):
@@ -49,7 +52,7 @@ class PLock:
         except:
             log.exception(f"Error writing pid file {self.pidfile}")
         else:
-            log.debug(f"Process [{self.pid}] locked to file [{self.pidfile}]")
+            log.debug(f"PID file [{self.pidfile}] created for pid [{self.pid}]")
 
     def lock(self):
         if self._aquirelock():

@@ -3,6 +3,8 @@
 # TODO:
 # Add 1wire temp for battery temperature
 # Add calculations for time remaining from rolling average
+# Add batt charging resets to restart the drain calc
+# Compare voltage list percentage calc against amp sum percentage calc
 #
 
 import pickle
@@ -10,7 +12,7 @@ import signal
 import subprocess
 import sys
 from datetime import datetime
-from os import nice
+from os import nice, geteuid
 from time import sleep, time
 
 import adafruit_shtc3
@@ -25,8 +27,6 @@ from luma.oled.device import ssd1351
 from pi1wire import Pi1Wire, Resolution
 from PIL import Image, ImageFont
 from processlock import PLock
-
-loglevel = 'DEBUG'
 
 INSTALL_DIR = "/home/ip/cyberdeck_display"
 DATA_FILE= "/home/ip/display_data.db"
@@ -54,6 +54,7 @@ BATT_AH_SIZE = 10
 BATT_TYPE = BATT_AGMSLA
 
 class Stats:
+    batt_size = BATT_AH_SIZE
     extr_temp = 0.0
     extr_humidity = 0.0
     cpu_load = 0
@@ -78,41 +79,48 @@ class Stats:
     extr_histogram_data = []
     batt_charge_start_time = 0
     batt_start_time = datetime.now()
+    batt_avg_total = 0
+    batt_avg_count = 0
+    batt_running_avg = 0
+    batt_used_time = 0
+    batt_used_amps = 0
+    batt_last_full_time = 0
+    last_boot = 0
     current_screen = 1
-    log.debug('Loading saved pickle data...')
-    try:
-        dbfile = open(DATA_FILE, 'rb')
-        db = pickle.load(dbfile)
-        batt_running_avg = db['running_avg']
-        batt_running_avg_count = db['avg_count']
-        batt_last_full_time = db['last_full']
-        last_boot = db['timestamp']
-        log.info(f'Loaded saved data: {db}')
-    except:
-        dbfile = open(DATA_FILE, 'ab')
-        db = {}
-        db['timestamp'] = datetime.now()
-        db['running_avg'] = 0
-        db['avg_count'] = 0
-        db['last_full'] = datetime.now()
-        pickle.dump(db, dbfile)
-        dbfile.close()
-        log.critical('Error loading saved pickle data')
-        exit(1)
 
     def __init__(self):
         for x_x in range(0, HISTOGRAM_RESOLUTION):
             self.batt_histogram_data.append(0)
             self.load_histogram_data.append(0)
             self.extr_histogram_data.append(0)
+        log.debug('Loading saved pickle data...')
+        try:
+            dbfile = open(DATA_FILE, 'rb')
+            db = pickle.load(dbfile)
+            batt_avg_total = db['total']
+            batt_avg_count = db['count']
+            batt_last_full_time = db['last_full']
+            last_boot = db['timestamp']
+            log.info(f'Loaded saved data: {db}')
+        except:
+            dbfile = open(DATA_FILE, 'wb')
+            db = {}
+            db['timestamp'] = datetime.now()
+            db['total'] = 0
+            db['count'] = 0
+            db['last_full'] = datetime.now()
+            pickle.dump(db, dbfile)
+            dbfile.close()
+            log.critical('Error loading saved pickle data')
+            exit(1)
 
     def save(self):
         try:
             dbfile = open(DATA_FILE, 'wb')
             db = {}
             db['timestamp'] = datetime.now()
-            db['running_avg'] = self.batt_running_avg
-            db['avg_count'] = self.batt_running_avg_count
+            db['total'] = self.batt_avg_total
+            db['count'] = self.batt_avg_count
             db['last_full'] = self.batt_last_full_time
             pickle.dump(db, dbfile)
             dbfile.close()
@@ -147,9 +155,13 @@ class Stats:
             self.batt_amps = round(sum(aamps) / len(avolts), 2)
             self.batt_watts = round(self.batt_volts * self.batt_amps, 1)
             log.info(f'Battery power data: [{self.batt_volts}v], [{self.batt_amps}a], [{self.batt_watts}w]')
-            self.batt_running_avg_count += 1
-            self.batt_running_avg = round(((self.batt_running_avg * (self.batt_running_avg_count-1) + self.batt_amps) / self.batt_running_avg_count), 2)
-            log.info(f'New battery running average: [{self.batt_running_avg:.2f}a], [{self.batt_running_avg_count}]')
+            self.batt_avg_count += 1
+            self.batt_avg_total = round(self.batt_avg_total + self.batt_amps, 2)
+            self.batt_running_avg = round((self.batt_avg_total / self.batt_avg_count), 2)
+            log.debug(f'Battery running average: [{self.batt_running_avg:.2f}a], [{self.batt_avg_total}], [{self.batt_avg_count}]')
+            self.batt_used_time = round(((self.batt_avg_count * 2) / 60) , 2)
+            self.batt_used_amps = round(self.batt_avg_total / (self.batt_used_time / 60), 2)
+            log.info(f'Battery usage: [{self.batt_used_amps:.2f}ahrs], [{(self.batt_used_time/60):.2f}hrs]')
         except:
             log.warning('Batt power sensor error, skipping')
         try:
@@ -263,8 +275,6 @@ def gpio_info(pin):
 def draw_value(position, text, color, draw):
     if position == 5 or position == 6:
         fontwidth = regfont_medium.getlength(text)
-    #elif position == 7:
-    #    fontwidth = medfont_medium.getlength(text)
     else:
         fontwidth = medfont_large.getlength(text)
     if position == 1:
@@ -452,6 +462,13 @@ def batt_screen():
             draw.bitmap((oled.width / 2 - 25, 65), chg_img)
 
 if __name__ == "__main__":
+    if geteuid() != 0:
+        print('This program must be run as root!')
+        exit(3)
+    if len(sys.argv[1:]) > 0:
+        loglevel = 'DEBUG'
+    else:
+        loglevel = 'ERROR'
     consoleformat = "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green>| <level>{level: <8}</level> | <level>{message}</level> |<cyan>{function}</cyan>:<cyan>{line}</cyan>"
     log.remove()
     log.add(sink=sys.stdout, level=loglevel, format=consoleformat, colorize=True)
@@ -497,7 +514,7 @@ if __name__ == "__main__":
 
     nice(-20)
 
-    log.debug("Initalizing display...")
+    log.debug("Initializing display...")
     serial = spi(device=0, port=0, gpio_DC=20, gpio_RST=21)
     oled = ssd1351(serial, width=128, height=128, bgr=True)
     log.debug("Display initialization successful")
@@ -535,15 +552,18 @@ if __name__ == "__main__":
     screen_start_time = time()
     save_start_time = time()
     log.debug('Starting main loop...')
+
     while(True):
-        if time() - update_start_time > UPDATE_SECONDS:
-            stats.update()
-            update_start_time = time()
-        elif time() - screen_start_time > SCREEN_SECONDS:
+        if time() - screen_start_time > SCREEN_SECONDS:
             stats.current_screen += 1
             if stats.current_screen == 5:
                 stats.current_screen = 0
             screen_start_time = time()
+
+        if time() - update_start_time > UPDATE_SECONDS:
+            stats.update()
+            update_start_time = time()
+
         if time() - save_start_time > 60:
             stats.save()
             save_start_time = time()

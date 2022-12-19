@@ -50,6 +50,8 @@ HISTOGRAM_RESOLUTION = 125
 SENSOR_RESOLUTION = 10
 SCREEN_SECONDS = 10
 UPDATE_SECONDS = 1
+LOOP_SLEEP_SECONDS = 2
+SPLASH_SECONDS = 5
 BATT_AH_SIZE = 10
 BATT_TYPE = BATT_AGMSLA
 
@@ -461,6 +463,24 @@ def batt_screen():
         if stats.batt_state == "Charging":
             draw.bitmap((oled.width / 2 - 25, 65), chg_img)
 
+def splash_screen():
+    with canvas(oled) as draw:
+        shape = [(1, 1), (oled.width-1, oled.height-1)]
+        draw.rectangle(shape, outline="Blue", fill="Black")
+        text = f'Cyberdeck'
+        fontwidth = medfont_large.getlength(text)
+        draw.text(((oled.width / 2) - (fontwidth / 2), 27), text, font=medfont_large, fill="DodgerBlue")
+        text = f'Offgrid'
+        fontwidth = medfont_medium.getlength(text)
+        draw.text(((oled.width / 2) - (fontwidth / 2), 50), text, font=medfont_medium, fill="Blue")
+        text = f'Field'
+        fontwidth = medfont_medium.getlength(text)
+        draw.text(((oled.width / 2) - (fontwidth / 2), 69), text, font=medfont_medium, fill="Blue")
+        text = f'Computer'
+        fontwidth = medfont_medium.getlength(text)
+        draw.text(((oled.width / 2) - (fontwidth / 2), oled.height - 43), text, font=medfont_medium, fill="Blue")
+
+
 if __name__ == "__main__":
     if geteuid() != 0:
         print('This program must be run as root!')
@@ -551,8 +571,12 @@ if __name__ == "__main__":
     update_start_time = time()
     screen_start_time = time()
     save_start_time = time()
+    splash_start_time = time()
+    log.debug('Displaying startup splash screen')
+    splash_screen()
+    while time() - splash_start_time < SPLASH_SECONDS:
+        sleep(1)
     log.debug('Starting main loop...')
-
     while(True):
         if time() - screen_start_time > SCREEN_SECONDS:
             stats.current_screen += 1
@@ -567,5 +591,5 @@ if __name__ == "__main__":
         if time() - save_start_time > 60:
             stats.save()
             save_start_time = time()
-        sleep(2)
+        sleep(LOOP_SLEEP_SECONDS)
 
